@@ -41,14 +41,24 @@ struct ContentView: View {
         }
         .confirmationDialog(
             "Supprimer la vidéo ?",
-            item: $pendingDelete
+            isPresented: Binding(
+                get: { pendingDelete != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        pendingDelete = nil
+                    }
+                }
+            )
         ) { video in
-            Button("Supprimer", role: .destructive) {
-                store.removeOffline(video)
+            if let video = pendingDelete {
+                Button("Supprimer", role: .destructive) {
+                    store.removeOffline(video)
+                    pendingDelete = nil
+                }
             }
             Button("Annuler", role: .cancel) {}
-        } message: { video in
-            Text("\(video.filename) sera retirée de l’onglet Hors ligne.")
+        } message: {
+            Text(pendingDelete.map { "\($0.filename) sera retirée de l’onglet Hors ligne." } ?? "")
         }
     }
 

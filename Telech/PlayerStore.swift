@@ -169,7 +169,7 @@ final class PlayerStore: ObservableObject {
         errorMessage = nil
         let options: [String: Any] = URLUtilities.isLocal(urlString)
             ? [:]
-            : [AVURLAssetHTTPHeaderFieldsKey: URLUtilities.headers(for: urlString)]
+            : ["AVURLAssetHTTPHeaderFieldsKey": URLUtilities.headers(for: urlString)]
         let asset = AVURLAsset(url: url, options: options)
         let item = AVPlayerItem(asset: asset)
         itemObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
