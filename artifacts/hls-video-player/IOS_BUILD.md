@@ -8,6 +8,12 @@ Le workflow `.github/workflows/build-ios-unsigned.yml` se lance depuis l’ongle
 **Actions** de GitHub avec **Run workflow**, ou automatiquement lorsqu’un tag
 commençant par `v` est poussé.
 
+Lors d’un lancement manuel, renseignez l’URL publique de l’application
+Replit dans le champ `api_domain` (par exemple `https://mon-app.replit.app`).
+Cette adresse doit être celle de l’application publiée qui expose l’API sous
+`/api`. Pour les builds par tag, configurez plutôt la variable GitHub Actions
+`EXPO_PUBLIC_DOMAIN`.
+
 Il :
 
 1. installe les dépendances JavaScript ;

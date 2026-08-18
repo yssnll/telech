@@ -2,6 +2,11 @@ name: Build unsigned iOS IPA
 
 on:
   workflow_dispatch:
+    inputs:
+      api_domain:
+        description: "URL publique de l'application publiée, par exemple https://mon-app.replit.app"
+        required: true
+        type: string
   push:
     tags:
       - "v*"
@@ -36,7 +41,15 @@ jobs:
 
       - name: Generate the native iOS project
         working-directory: artifacts/hls-video-player
-        run: pnpm exec expo prebuild --platform ios --no-install --non-interactive
+        env:
+          EXPO_PUBLIC_DOMAIN: ${{ inputs.api_domain || vars.EXPO_PUBLIC_DOMAIN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${EXPO_PUBLIC_DOMAIN:-}" ]; then
+            echo "::error::Set the public API URL in the api_domain workflow input or the EXPO_PUBLIC_DOMAIN repository variable."
+            exit 1
+          fi
+          pnpm exec expo prebuild --platform ios --no-install --non-interactive
 
       - name: Install CocoaPods dependencies
         working-directory: artifacts/hls-video-player/ios

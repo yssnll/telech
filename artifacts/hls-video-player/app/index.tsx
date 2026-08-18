@@ -1,10 +1,5 @@
 import { Feather, Ionicons } from '@expo/vector-icons';
 import { File, Paths } from 'expo-file-system';
-import {
-  createDownloadResumable,
-  FileSystemSessionType,
-  type DownloadProgressData,
-} from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -173,9 +168,6 @@ export default function PlayerScreen() {
   const [downloadBytes, setDownloadBytes] = useState<{ written: number; total: number } | null>(null);
   const [downloadEtaSeconds, setDownloadEtaSeconds] = useState<number | null>(null);
   const activeUrlRef = useRef<string | null>(null);
-  const activeDownloadRef = useRef<ReturnType<typeof createDownloadResumable> | null>(null);
-  const downloadRunRef = useRef(0);
-  const downloadMetricsRef = useRef({ startedAt: 0, lastWritten: 0, lastAt: 0, speedBytesPerSecond: 0 });
   const proxyFallbackAttemptedRef = useRef(false);
   activeUrlRef.current = activeUrl;
 
@@ -336,87 +328,43 @@ export default function PlayerScreen() {
     }
 
     const mode = action === 'fast' ? 'fast' : 'compatible';
-    const downloadUrl = getApiDownloadUrl(sourceUrl, mode, selectedQuality);
-    const downloadRun = downloadRunRef.current + 1;
-    downloadRunRef.current = downloadRun;
     setDownloadState('working');
     setDownloadProgress(null);
     setDownloadBytes(null);
     setDownloadEtaSeconds(null);
-    const downloadStartedAt = Date.now();
-    downloadMetricsRef.current = {
-      startedAt: downloadStartedAt,
-      lastWritten: 0,
-      lastAt: downloadStartedAt,
-      speedBytesPerSecond: 0,
-    };
     setDownloadMessage('Préparation de la conversion MP4…');
+    setShowDownloadOptions(false);
 
-    if (Platform.OS === 'web' && typeof window !== 'undefined') {
-      const anchor = document.createElement('a');
-      anchor.href = downloadUrl;
-      anchor.download = `video-${Date.now()}.mp4`;
-      anchor.style.display = 'none';
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      setShowDownloadOptions(false);
-      setDownloadState('browser');
-      setDownloadEtaSeconds(null);
-      setDownloadMessage(
-        'Safari gère maintenant le téléchargement. Il continue si tu changes d’app, tant que tu ne fermes pas l’onglet.',
-      );
-      return;
-    }
-
-    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     try {
+      const downloadUrl = getApiDownloadUrl(sourceUrl, mode, selectedQuality);
+
+      if (Platform.OS === 'web' && typeof window !== 'undefined') {
+        const anchor = document.createElement('a');
+        anchor.href = downloadUrl;
+        anchor.download = `video-${Date.now()}.mp4`;
+        anchor.style.display = 'none';
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        setShowDownloadOptions(false);
+        setDownloadState('browser');
+        setDownloadEtaSeconds(null);
+        setDownloadMessage(
+          'Safari gère maintenant le téléchargement. Il continue si tu changes d’app, tant que tu ne fermes pas l’onglet.',
+        );
+        return;
+      }
+
+      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       const filename = `video-${Date.now()}.mp4`;
-      const destination = new File(Paths.cache, filename);
-      const downloadTask = createDownloadResumable(
-        downloadUrl,
-        destination.uri,
-        { sessionType: FileSystemSessionType.BACKGROUND },
-        (progress: DownloadProgressData) => {
-          if (downloadRun !== downloadRunRef.current) return;
-          const total = progress.totalBytesExpectedToWrite;
-          const percentage = total > 0
-            ? Math.min(100, Math.round((progress.totalBytesWritten / total) * 100))
-            : null;
-          const now = Date.now();
-          const metrics = downloadMetricsRef.current;
-          const elapsedSeconds = Math.max((now - metrics.startedAt) / 1000, 0.25);
-          const intervalSeconds = Math.max((now - metrics.lastAt) / 1000, 0.25);
-          const intervalBytes = Math.max(progress.totalBytesWritten - metrics.lastWritten, 0);
-          const instantSpeed = intervalBytes / intervalSeconds;
-          const overallSpeed = progress.totalBytesWritten / elapsedSeconds;
-          const measuredSpeed = instantSpeed > 0
-            ? metrics.speedBytesPerSecond > 0
-              ? metrics.speedBytesPerSecond * 0.7 + instantSpeed * 0.3
-              : overallSpeed
-            : metrics.speedBytesPerSecond;
-          metrics.lastWritten = progress.totalBytesWritten;
-          metrics.lastAt = now;
-          metrics.speedBytesPerSecond = measuredSpeed;
-          setDownloadEtaSeconds(
-            total > 0 && measuredSpeed > 0
-              ? Math.max(0, (total - progress.totalBytesWritten) / measuredSpeed)
-              : null,
-          );
-          setDownloadProgress(percentage);
-          setDownloadBytes({ written: progress.totalBytesWritten, total });
-          setDownloadMessage(
-            percentage === null
-              ? `Téléchargement en cours… ${formatBytes(progress.totalBytesWritten)} reçus`
-              : `Téléchargement en cours… ${percentage}%`,
-          );
-        },
-      );
-      activeDownloadRef.current = downloadTask;
-      const result = await downloadTask.downloadAsync();
-      activeDownloadRef.current = null;
-      if (!result) {
-        throw new Error('Le téléchargement a été annulé.');
+      // The current Expo FileSystem API is reliable in standalone iOS builds.
+      // The legacy resumable API can resolve without presenting a usable file
+      // when the app is backgrounded or the server responds after a long
+      // conversion.
+      const destination = new File(Paths.document, filename);
+      const result = await File.downloadFileAsync(downloadUrl, destination, { idempotent: true });
+      if (!result.exists || result.size <= 0) {
+        throw new Error('Le fichier MP4 reçu est vide ou indisponible.');
       }
       setDownloadProgress(100);
       setDownloadEtaSeconds(0);
@@ -446,7 +394,6 @@ export default function PlayerScreen() {
         message,
       );
     } finally {
-      activeDownloadRef.current = null;
       setDownloadState('idle');
     }
   };
