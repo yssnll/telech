@@ -1,6 +1,5 @@
 import { Feather, Ionicons } from '@expo/vector-icons';
-import { File, Paths } from 'expo-file-system';
-import * as Sharing from 'expo-sharing';
+import { Directory, File, Paths } from 'expo-file-system';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
@@ -9,38 +8,38 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   AppState,
-  Linking,
-  Modal,
   Platform,
   Pressable,
-  Share,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { getDownloadHlsAsMp4Url, getProxyHlsResourceUrl } from '@workspace/api-client-react';
 import { KeyboardAwareScrollViewCompat } from '@/components/KeyboardAwareScrollViewCompat';
 import { useColors } from '@/hooks/useColors';
 
 const DEFAULT_URL =
   'https://video.sibnet.ru/v/b85c60dd8c85fd25641a21fbcbb3d20c/6223248.m3u8';
 const HISTORY_KEY = '@hls-video-player/history';
+const OFFLINE_KEY = '@hls-video-player/offline';
+const OFFLINE_DIRECTORY = 'offline-videos';
 const MAX_HISTORY = 5;
 
 type PlaybackState = 'idle' | 'loading' | 'ready' | 'error';
-type DownloadAction = 'mp4' | 'fast' | 'browser' | 'share';
-type DownloadQuality = 'original' | '360' | '480' | '720' | '1080';
-type DownloadState = 'idle' | 'working' | 'browser';
+type DownloadState = 'idle' | 'working';
+type Tab = 'playback' | 'offline';
 
-const QUALITY_OPTIONS: Array<{ value: DownloadQuality; label: string; hint: string }> = [
-  { value: 'original', label: 'Originale', hint: 'max' },
-  { value: '360', label: '360p', hint: 'léger' },
-  { value: '480', label: '480p', hint: 'standard' },
-  { value: '720', label: '720p', hint: 'HD' },
-  { value: '1080', label: '1080p', hint: 'Full HD' },
-];
+type OfflineVideo = {
+  id: string;
+  sourceUrl: string;
+  localUri: string;
+  filename: string;
+  createdAt: number;
+  size: number;
+  format: 'mp4' | 'hls';
+};
 
 function isValidStreamUrl(value: string) {
   try {
@@ -51,13 +50,35 @@ function isValidStreamUrl(value: string) {
   }
 }
 
+function isHlsUrl(value: string) {
+  try {
+    return new URL(value).pathname.toLowerCase().endsWith('.m3u8');
+  } catch {
+    return value.toLowerCase().includes('.m3u8');
+  }
+}
+
 function shortenUrl(value: string) {
   try {
     const parsed = new URL(value);
-    return `${parsed.hostname}${parsed.pathname.length > 22 ? `${parsed.pathname.slice(0, 22)}…` : parsed.pathname}`;
+    return `${parsed.hostname}${parsed.pathname.length > 24 ? `${parsed.pathname.slice(0, 24)}…` : parsed.pathname}`;
   } catch {
-    return value;
+    return value.length > 34 ? `${value.slice(0, 34)}…` : value;
   }
+}
+
+function getFilename(streamUrl: string, fallback = 'video') {
+  try {
+    const pathname = new URL(streamUrl).pathname;
+    const lastPart = pathname.split('/').filter(Boolean).pop();
+    if (lastPart) {
+      const decoded = decodeURIComponent(lastPart).replace(/\.(m3u8|mp4|m4v|mov|ts)$/i, '');
+      if (decoded) return decoded.replace(/[^a-zA-Z0-9-_ ]/g, '_').slice(0, 60);
+    }
+  } catch {
+    // Use the fallback when the URL does not contain a usable filename.
+  }
+  return fallback;
 }
 
 function getStreamHeaders(streamUrl: string): Record<string, string> {
@@ -106,28 +127,6 @@ function formatExpiry(expiry: number) {
   }).format(new Date(expiry));
 }
 
-function getApiDownloadUrl(
-  streamUrl: string,
-  mode: 'compatible' | 'fast',
-  quality: DownloadQuality,
-) {
-  const domain = process.env.EXPO_PUBLIC_DOMAIN;
-  if (!domain) {
-    throw new Error('Le service de conversion MP4 est indisponible dans cet environnement.');
-  }
-  const baseUrl = domain.startsWith('http') ? domain : `https://${domain}`;
-  return `${baseUrl}${getDownloadHlsAsMp4Url({ url: streamUrl, mode, quality })}`;
-}
-
-function getApiProxyUrl(streamUrl: string) {
-  const domain = process.env.EXPO_PUBLIC_DOMAIN;
-  if (!domain) {
-    throw new Error('Le relais HLS est indisponible dans cet environnement.');
-  }
-  const baseUrl = domain.startsWith('http') ? domain : `https://${domain}`;
-  return `${baseUrl}${getProxyHlsResourceUrl({ url: streamUrl })}`;
-}
-
 function formatBytes(bytes: number) {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
   if (bytes < 1024) return `${Math.round(bytes)} B`;
@@ -136,39 +135,114 @@ function formatBytes(bytes: number) {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} Go`;
 }
 
-function formatRemainingTime(seconds: number) {
-  const roundedSeconds = Math.max(1, Math.ceil(seconds));
-  if (roundedSeconds < 60) return `${roundedSeconds} s`;
+function formatDate(timestamp: number) {
+  return new Intl.DateTimeFormat('fr-BE', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(new Date(timestamp));
+}
 
-  const minutes = Math.floor(roundedSeconds / 60);
-  const remainingSeconds = roundedSeconds % 60;
-  if (minutes < 60) {
-    return remainingSeconds > 0 ? `${minutes} min ${remainingSeconds} s` : `${minutes} min`;
+function parseAttributes(value: string) {
+  const result: Record<string, string> = {};
+  const matcher = /([A-Z0-9-]+)=(?:"([^"]*)"|([^,]*))/g;
+  let match: RegExpExecArray | null;
+  while ((match = matcher.exec(value)) !== null) {
+    result[match[1]] = match[2] ?? match[3] ?? '';
+  }
+  return result;
+}
+
+async function fetchText(url: string) {
+  const response = await fetch(url, { headers: getStreamHeaders(url) });
+  if (!response.ok) {
+    throw new Error(`La playlist n’est pas accessible (${response.status}).`);
+  }
+  return response.text();
+}
+
+async function fetchBytes(url: string) {
+  const response = await fetch(url, { headers: getStreamHeaders(url) });
+  if (!response.ok) {
+    throw new Error(`Un segment vidéo n’est pas accessible (${response.status}).`);
+  }
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+function extractMediaPlaylist(masterText: string, masterUrl: string) {
+  const lines = masterText.split(/\r?\n/).map((line) => line.trim());
+  const variants: Array<{ url: string; bandwidth: number; height: number }> = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!line.startsWith('#EXT-X-STREAM-INF:')) continue;
+    const attributes = parseAttributes(line.slice('#EXT-X-STREAM-INF:'.length));
+    const nextLine = lines.slice(index + 1).find((candidate) => candidate && !candidate.startsWith('#'));
+    if (!nextLine) continue;
+    const resolution = attributes.RESOLUTION?.match(/x(\d+)/i);
+    variants.push({
+      url: new URL(nextLine, masterUrl).toString(),
+      bandwidth: Number(attributes.BANDWIDTH) || 0,
+      height: resolution ? Number(resolution[1]) : 0,
+    });
   }
 
-  const hours = Math.floor(minutes / 60);
-  const remainingMinutes = minutes % 60;
-  return remainingMinutes > 0 ? `${hours} h ${remainingMinutes} min` : `${hours} h`;
+  if (variants.length === 0) return null;
+  return variants.sort((left, right) => right.height - left.height || right.bandwidth - left.bandwidth)[0].url;
+}
+
+function extractSegmentUrls(playlistText: string, playlistUrl: string) {
+  const lines = playlistText.split(/\r?\n/).map((line) => line.trim());
+  const segments: string[] = [];
+  let initializationSegment: string | null = null;
+
+  for (const line of lines) {
+    if (line.startsWith('#EXT-X-KEY:')) {
+      const method = parseAttributes(line.slice('#EXT-X-KEY:'.length)).METHOD;
+      if (method && method !== 'NONE') {
+        throw new Error('Ce flux HLS est chiffré et ne peut pas être sauvegardé hors ligne sans son fournisseur.');
+      }
+    }
+    if (line.startsWith('#EXT-X-MAP:')) {
+      const uri = parseAttributes(line.slice('#EXT-X-MAP:'.length)).URI;
+      if (uri) initializationSegment = new URL(uri, playlistUrl).toString();
+    }
+    if (line && !line.startsWith('#')) {
+      segments.push(new URL(line, playlistUrl).toString());
+    }
+  }
+
+  if (segments.length === 0) {
+    throw new Error('La playlist HLS ne contient aucun segment vidéo téléchargeable.');
+  }
+
+  return { segments, initializationSegment };
+}
+
+function createOfflineId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function isLocalUri(value: string) {
+  return value.startsWith('file://') || value.startsWith('/');
 }
 
 export default function PlayerScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
+  const [activeTab, setActiveTab] = useState<Tab>('playback');
   const [url, setUrl] = useState<string>(DEFAULT_URL);
   const [activeUrl, setActiveUrl] = useState<string | null>(null);
+  const [activeTitle, setActiveTitle] = useState<string | null>(null);
   const [history, setHistory] = useState<string[]>([]);
+  const [offlineVideos, setOfflineVideos] = useState<OfflineVideo[]>([]);
   const [state, setState] = useState<PlaybackState>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [showDetails, setShowDetails] = useState(false);
-  const [showDownloadOptions, setShowDownloadOptions] = useState(false);
-  const [selectedQuality, setSelectedQuality] = useState<DownloadQuality>('1080');
   const [downloadState, setDownloadState] = useState<DownloadState>('idle');
   const [downloadMessage, setDownloadMessage] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
-  const [downloadBytes, setDownloadBytes] = useState<{ written: number; total: number } | null>(null);
-  const [downloadEtaSeconds, setDownloadEtaSeconds] = useState<number | null>(null);
   const activeUrlRef = useRef<string | null>(null);
-  const proxyFallbackAttemptedRef = useRef(false);
+
   activeUrlRef.current = activeUrl;
 
   const player = useVideoPlayer(null, (videoPlayer) => {
@@ -179,11 +253,32 @@ export default function PlayerScreen() {
 
   useEffect(() => {
     let isMounted = true;
-    AsyncStorage.getItem(HISTORY_KEY)
-      .then((stored) => {
-        if (!stored || !isMounted) return;
-        const parsed: unknown = JSON.parse(stored);
-        if (Array.isArray(parsed)) setHistory(parsed.filter((item): item is string => typeof item === 'string'));
+    Promise.all([AsyncStorage.getItem(HISTORY_KEY), AsyncStorage.getItem(OFFLINE_KEY)])
+      .then(([storedHistory, storedOffline]) => {
+        if (!isMounted) return;
+        if (storedHistory) {
+          const parsed: unknown = JSON.parse(storedHistory);
+          if (Array.isArray(parsed)) {
+            setHistory(parsed.filter((item): item is string => typeof item === 'string').slice(0, MAX_HISTORY));
+          }
+        }
+        if (storedOffline) {
+          const parsed: unknown = JSON.parse(storedOffline);
+          if (Array.isArray(parsed)) {
+            setOfflineVideos(
+              parsed.filter(
+                (item): item is OfflineVideo =>
+                  Boolean(
+                    item &&
+                      typeof item === 'object' &&
+                      typeof (item as OfflineVideo).id === 'string' &&
+                      typeof (item as OfflineVideo).localUri === 'string' &&
+                      typeof (item as OfflineVideo).filename === 'string',
+                  ),
+              ),
+            );
+          }
+        }
       })
       .catch(() => undefined);
 
@@ -195,33 +290,8 @@ export default function PlayerScreen() {
         setErrorMessage(null);
       }
       if (status === 'error') {
-        const failedUrl = activeUrlRef.current;
-        if (failedUrl && !proxyFallbackAttemptedRef.current) {
-          proxyFallbackAttemptedRef.current = true;
-          setState('loading');
-          setErrorMessage(null);
-          void player
-            .replaceAsync({
-              uri: getApiProxyUrl(failedUrl),
-              contentType: 'hls',
-              metadata: {
-                title: 'HLS Video Player',
-                artist: 'Flux HLS',
-              },
-            })
-            .then(() => player.play())
-            .catch((fallbackError) => {
-              setState('error');
-              setErrorMessage(
-                fallbackError instanceof Error
-                  ? fallbackError.message
-                  : 'Impossible de charger ce flux, même via le relais HLS.',
-              );
-            });
-          return;
-        }
         setState('error');
-        setErrorMessage(error?.message ?? 'Le serveur a refusé la lecture du flux.');
+        setErrorMessage(error?.message ?? 'Impossible de charger cette vidéo.');
       }
     });
 
@@ -234,18 +304,49 @@ export default function PlayerScreen() {
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextState) => {
       if (nextState === 'background' && downloadState === 'working' && Platform.OS !== 'web') {
-        setDownloadMessage('Téléchargement en arrière-plan… il continuera pendant que tu utilises une autre app.');
+        setDownloadMessage('Téléchargement en cours. Il continuera tant que le système garde l’app active.');
       }
     });
-
     return () => subscription.remove();
   }, [downloadState]);
 
-  const sourceLabel = useMemo(() => (activeUrl ? shortenUrl(activeUrl) : 'Aucun flux actif'), [activeUrl]);
+  const sourceLabel = useMemo(
+    () => activeTitle ?? (activeUrl ? shortenUrl(activeUrl) : 'Aucune vidéo active'),
+    [activeTitle, activeUrl],
+  );
 
   const persistHistory = async (nextHistory: string[]) => {
     setHistory(nextHistory);
     await AsyncStorage.setItem(HISTORY_KEY, JSON.stringify(nextHistory));
+  };
+
+  const persistOfflineVideos = async (nextVideos: OfflineVideo[]) => {
+    setOfflineVideos(nextVideos);
+    await AsyncStorage.setItem(OFFLINE_KEY, JSON.stringify(nextVideos));
+  };
+
+  const loadVideo = async (sourceUrl: string, title?: string) => {
+    setState('loading');
+    setErrorMessage(null);
+    setActiveUrl(sourceUrl);
+    setActiveTitle(title ?? null);
+    activeUrlRef.current = sourceUrl;
+
+    try {
+      await player.replaceAsync({
+        uri: sourceUrl,
+        ...(isHlsUrl(sourceUrl) ? { contentType: 'hls' as const } : {}),
+        ...(isLocalUri(sourceUrl) ? {} : { headers: getStreamHeaders(sourceUrl) }),
+        metadata: {
+          title: title ?? 'Vidéo hors ligne',
+          artist: 'Lecteur vidéo',
+        },
+      });
+      player.play();
+    } catch (error) {
+      setState('error');
+      setErrorMessage(error instanceof Error ? error.message : 'Impossible de charger cette vidéo.');
+    }
   };
 
   const openStream = async (candidate = url) => {
@@ -260,39 +361,18 @@ export default function PlayerScreen() {
     if (signedUrlExpiry && signedUrlExpiry <= Date.now()) {
       setUrl(nextUrl);
       setActiveUrl(nextUrl);
+      setActiveTitle(null);
       setState('error');
       setErrorMessage(`Ce lien signé a expiré le ${formatExpiry(signedUrlExpiry)}. Demandez un nouveau lien au site source.`);
-      setShowDetails(false);
       return;
     }
 
     await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setUrl(nextUrl);
-    setActiveUrl(nextUrl);
-    activeUrlRef.current = nextUrl;
-    proxyFallbackAttemptedRef.current = false;
-    setState('loading');
-    setErrorMessage(null);
     setShowDetails(false);
-
     const nextHistory = [nextUrl, ...history.filter((item) => item !== nextUrl)].slice(0, MAX_HISTORY);
     await persistHistory(nextHistory);
-
-    try {
-      await player.replaceAsync({
-        uri: nextUrl,
-        contentType: 'hls',
-        headers: getStreamHeaders(nextUrl),
-        metadata: {
-          title: 'HLS Video Player',
-          artist: 'Flux HLS',
-        },
-      });
-      player.play();
-    } catch (error) {
-      setState('error');
-      setErrorMessage(error instanceof Error ? error.message : 'Impossible de charger ce flux.');
-    }
+    await loadVideo(nextUrl);
   };
 
   const clearHistory = async () => {
@@ -300,569 +380,482 @@ export default function PlayerScreen() {
     await persistHistory([]);
   };
 
-  const downloadSource = async (action: DownloadAction) => {
+  const downloadDirectVideo = async (sourceUrl: string, destination: File) => {
+    const result = await File.downloadFileAsync(sourceUrl, destination, { idempotent: true });
+    if (!result.exists || result.size <= 0) {
+      throw new Error('Le fichier vidéo reçu est vide ou indisponible.');
+    }
+    return result;
+  };
+
+  const downloadHlsVideo = async (
+    sourceUrl: string,
+    directory: Directory,
+    onProgress: (value: number) => void,
+  ) => {
+    const firstPlaylist = await fetchText(sourceUrl);
+    const mediaUrl = extractMediaPlaylist(firstPlaylist, sourceUrl) ?? sourceUrl;
+    const mediaPlaylist = mediaUrl === sourceUrl ? firstPlaylist : await fetchText(mediaUrl);
+    const { segments, initializationSegment } = extractSegmentUrls(mediaPlaylist, mediaUrl);
+    const localPlaylistLines = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-TARGETDURATION:10', '#EXT-X-MEDIA-SEQUENCE:0'];
+    let totalBytes = 0;
+    let downloaded = 0;
+
+    if (initializationSegment) {
+      const bytes = await fetchBytes(initializationSegment);
+      const initializationFile = new File(directory, 'init.mp4');
+      initializationFile.write(bytes);
+      totalBytes += bytes.byteLength;
+      localPlaylistLines.push('#EXT-X-MAP:URI="init.mp4"');
+    }
+
+    for (let index = 0; index < segments.length; index += 1) {
+      const bytes = await fetchBytes(segments[index]);
+      const filename = `segment-${String(index).padStart(5, '0')}.bin`;
+      const segmentFile = new File(directory, filename);
+      segmentFile.write(bytes);
+      totalBytes += bytes.byteLength;
+      downloaded += 1;
+      localPlaylistLines.push('#EXTINF:10.000,', filename);
+      onProgress(Math.round((downloaded / segments.length) * 100));
+    }
+
+    localPlaylistLines.push('#EXT-X-ENDLIST');
+    const playlistFile = new File(directory, 'index.m3u8');
+    playlistFile.write(localPlaylistLines.join('\n'));
+    return { localUri: playlistFile.uri, size: totalBytes };
+  };
+
+  const downloadSource = async () => {
     const sourceUrl = (activeUrl ?? url).trim();
     if (!isValidStreamUrl(sourceUrl)) {
       setState('error');
       setErrorMessage('Collez une adresse vidéo valide avant de télécharger.');
-      setShowDownloadOptions(false);
+      return;
+    }
+    if (Platform.OS === 'web') {
+      setState('error');
+      setErrorMessage('Le stockage hors ligne est disponible dans l’application iOS, pas dans l’aperçu web.');
       return;
     }
 
-    if (action === 'browser') {
-      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      setShowDownloadOptions(false);
-      await Linking.openURL(sourceUrl);
-      return;
-    }
-
-    if (action === 'share') {
-      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      setShowDownloadOptions(false);
-      await Share.share({
-        message: sourceUrl,
-        url: sourceUrl,
-        title: 'Lien du flux vidéo',
-      });
-      return;
-    }
-
-    const mode = action === 'fast' ? 'fast' : 'compatible';
+    const id = createOfflineId();
+    const filename = `${getFilename(sourceUrl)}.${isHlsUrl(sourceUrl) ? 'm3u8' : 'mp4'}`;
+    const directory = new Directory(Paths.document, OFFLINE_DIRECTORY, id);
     setDownloadState('working');
-    setDownloadProgress(null);
-    setDownloadBytes(null);
-    setDownloadEtaSeconds(null);
-    setDownloadMessage('Préparation de la conversion MP4…');
-    setShowDownloadOptions(false);
+    setDownloadProgress(0);
+    setDownloadMessage(isHlsUrl(sourceUrl) ? 'Téléchargement des segments HLS…' : 'Téléchargement de la vidéo…');
 
     try {
-      const downloadUrl = getApiDownloadUrl(sourceUrl, mode, selectedQuality);
+      directory.create({ idempotent: true, intermediates: true });
+      let localUri: string;
+      let size: number;
+      let format: OfflineVideo['format'];
 
-      if (Platform.OS === 'web' && typeof window !== 'undefined') {
-        const anchor = document.createElement('a');
-        anchor.href = downloadUrl;
-        anchor.download = `video-${Date.now()}.mp4`;
-        anchor.style.display = 'none';
-        document.body.appendChild(anchor);
-        anchor.click();
-        anchor.remove();
-        setShowDownloadOptions(false);
-        setDownloadState('browser');
-        setDownloadEtaSeconds(null);
-        setDownloadMessage(
-          'Safari gère maintenant le téléchargement. Il continue si tu changes d’app, tant que tu ne fermes pas l’onglet.',
-        );
-        return;
+      if (isHlsUrl(sourceUrl)) {
+        const result = await downloadHlsVideo(sourceUrl, directory, setDownloadProgress);
+        localUri = result.localUri;
+        size = result.size;
+        format = 'hls';
+      } else {
+        const result = await downloadDirectVideo(sourceUrl, new File(directory, 'video.mp4'));
+        localUri = result.uri;
+        size = result.size;
+        setDownloadProgress(100);
+        format = 'mp4';
       }
 
-      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      const filename = `video-${Date.now()}.mp4`;
-      // The current Expo FileSystem API is reliable in standalone iOS builds.
-      // The legacy resumable API can resolve without presenting a usable file
-      // when the app is backgrounded or the server responds after a long
-      // conversion.
-      const destination = new File(Paths.document, filename);
-      const result = await File.downloadFileAsync(downloadUrl, destination, { idempotent: true });
-      if (!result.exists || result.size <= 0) {
-        throw new Error('Le fichier MP4 reçu est vide ou indisponible.');
-      }
-      setDownloadProgress(100);
-      setDownloadEtaSeconds(0);
-      setDownloadMessage('Téléchargement terminé. Préparation du partage…');
-
-      const canShare = await Sharing.isAvailableAsync();
-      if (!canShare) {
-        const message = `Fichier téléchargé : ${filename}`;
-        setDownloadMessage(message);
-        Alert.alert('Fichier téléchargé', `${filename} est disponible dans le stockage de l’app.`);
-        return;
-      }
-      await Sharing.shareAsync(result.uri, {
-        UTI: 'public.mpeg-4',
-        mimeType: 'video/mp4',
-        dialogTitle: 'Enregistrer la vidéo MP4',
-      });
-      setDownloadMessage('Le fichier MP4 est prêt. Choisissez où l’enregistrer dans le menu de partage.');
+      const item: OfflineVideo = {
+        id,
+        sourceUrl,
+        localUri,
+        filename,
+        createdAt: Date.now(),
+        size,
+        format,
+      };
+      await persistOfflineVideos([item, ...offlineVideos.filter((video) => video.sourceUrl !== sourceUrl)]);
+      setDownloadMessage('Vidéo enregistrée. Elle est maintenant disponible dans Hors ligne.');
+      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : 'Le serveur n’a pas autorisé le téléchargement de ce flux.';
+      new Directory(Paths.document, OFFLINE_DIRECTORY, id).delete();
+      const message = error instanceof Error ? error.message : 'Le téléchargement a échoué.';
       setDownloadMessage(`Téléchargement impossible : ${message}`);
-      Alert.alert(
-        'Téléchargement impossible',
-        message,
-      );
+      Alert.alert('Téléchargement impossible', message);
     } finally {
       setDownloadState('idle');
     }
   };
 
+  const playOfflineVideo = async (video: OfflineVideo) => {
+    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setActiveTab('playback');
+    setDownloadMessage(null);
+    await loadVideo(video.localUri, video.filename);
+  };
+
+  const removeOfflineVideo = (video: OfflineVideo) => {
+    Alert.alert('Supprimer la vidéo ?', `${video.filename} sera retirée de l’onglet Hors ligne.`, [
+      { text: 'Annuler', style: 'cancel' },
+      {
+        text: 'Supprimer',
+        style: 'destructive',
+        onPress: () => {
+          void (async () => {
+            new Directory(Paths.document, OFFLINE_DIRECTORY, video.id).delete();
+            await persistOfflineVideos(offlineVideos.filter((item) => item.id !== video.id));
+          })();
+        },
+      },
+    ]);
+  };
+
   const stateCopy = {
     idle: { label: 'Prêt à lire', color: colors.mutedForeground },
-    loading: { label: 'Connexion au flux…', color: colors.warning },
+    loading: { label: 'Chargement…', color: colors.warning },
     ready: { label: 'Lecture en cours', color: colors.success },
-    error: { label: 'Accès refusé ou flux indisponible', color: colors.destructive },
+    error: { label: 'Vidéo indisponible', color: colors.destructive },
   }[state];
-  const signedUrlExpiry = activeUrl ? getSignedUrlExpiry(activeUrl) : null;
+  const signedUrlExpiry = activeUrl && !isLocalUri(activeUrl) ? getSignedUrlExpiry(activeUrl) : null;
   const errorTitle = signedUrlExpiry && signedUrlExpiry <= Date.now()
     ? 'Le lien a expiré'
     : errorMessage?.includes('403')
-      ? 'Le serveur a répondu 403'
+      ? 'Accès refusé par le site source'
       : 'Lecture refusée';
+
+  const renderHeader = () => (
+    <>
+      <View style={styles.header}>
+        <View style={styles.brandMark}>
+          <Ionicons name="play" size={20} color={colors.primaryForeground} />
+        </View>
+        <View style={styles.headerText}>
+          <Text style={[styles.eyebrow, { color: colors.accent }]}>LECTEUR VIDÉO</Text>
+          <Text style={[styles.title, { color: colors.foreground }]}>Regarder, puis garder.</Text>
+        </View>
+        <View style={[styles.offlinePill, { backgroundColor: colors.secondary }]}>
+          <Ionicons name="shield-checkmark-outline" size={13} color={colors.accent} />
+          <Text style={[styles.liveText, { color: colors.secondaryForeground }]}>local</Text>
+        </View>
+      </View>
+
+      <View style={[styles.tabs, { backgroundColor: colors.card, borderColor: colors.border }]}>
+        <Pressable
+          testID="playback-tab"
+          onPress={() => setActiveTab('playback')}
+          style={[styles.tab, activeTab === 'playback' && { backgroundColor: colors.primary }]}
+        >
+          <Ionicons
+            name="play-circle-outline"
+            size={18}
+            color={activeTab === 'playback' ? colors.primaryForeground : colors.mutedForeground}
+          />
+          <Text style={[styles.tabText, { color: activeTab === 'playback' ? colors.primaryForeground : colors.mutedForeground }]}>
+            Lecture
+          </Text>
+        </Pressable>
+        <Pressable
+          testID="offline-tab"
+          onPress={() => setActiveTab('offline')}
+          style={[styles.tab, activeTab === 'offline' && { backgroundColor: colors.primary }]}
+        >
+          <Ionicons
+            name="download-outline"
+            size={18}
+            color={activeTab === 'offline' ? colors.primaryForeground : colors.mutedForeground}
+          />
+          <Text style={[styles.tabText, { color: activeTab === 'offline' ? colors.primaryForeground : colors.mutedForeground }]}>
+            Hors ligne
+          </Text>
+          {offlineVideos.length > 0 ? (
+            <View style={[styles.countBadge, { backgroundColor: activeTab === 'offline' ? colors.primaryForeground : colors.secondary }]}>
+              <Text style={[styles.countText, { color: activeTab === 'offline' ? colors.primary : colors.foreground }]}>
+                {offlineVideos.length}
+              </Text>
+            </View>
+          ) : null}
+        </Pressable>
+      </View>
+    </>
+  );
+
+  const renderPlayer = () => (
+    <>
+      <Text style={[styles.subtitle, { color: colors.mutedForeground }]}>
+        Collez le lien d’une vidéo ou d’une playlist .m3u8, regardez-la, puis gardez-la sur l’iPhone.
+      </Text>
+
+      <View style={[styles.playerShell, { borderColor: colors.border, backgroundColor: colors.card }]}>
+        {activeUrl ? (
+          <VideoView
+            player={player}
+            style={styles.video}
+            nativeControls
+            contentFit="contain"
+            allowsFullscreen
+            allowsPictureInPicture
+          />
+        ) : (
+          <View style={styles.emptyPlayer}>
+            <View style={[styles.emptyIcon, { backgroundColor: colors.secondary }]}>
+              <Ionicons name="play-outline" size={34} color={colors.primary} />
+            </View>
+            <Text style={[styles.emptyTitle, { color: colors.foreground }]}>Votre vidéo apparaîtra ici</Text>
+            <Text style={[styles.emptyText, { color: colors.mutedForeground }]}>
+              La lecture et l’enregistrement se font depuis cet écran.
+            </Text>
+          </View>
+        )}
+        {activeUrl && state === 'loading' ? (
+          <View style={[styles.loadingBadge, { backgroundColor: colors.overlay }]}>
+            <Text style={[styles.loadingBadgeText, { color: colors.warning }]}>CHARGEMENT</Text>
+          </View>
+        ) : null}
+      </View>
+
+      <View style={styles.statusRow}>
+        <View style={[styles.statusDot, { backgroundColor: stateCopy.color }]} />
+        <Text style={[styles.statusText, { color: colors.mutedForeground }]}>{stateCopy.label}</Text>
+        {activeUrl ? (
+          <Text numberOfLines={1} style={[styles.activeLabel, { color: colors.foreground }]}>
+            {sourceLabel}
+          </Text>
+        ) : null}
+      </View>
+
+      <View style={[styles.formCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
+        <View style={styles.fieldHeader}>
+          <Text style={[styles.fieldLabel, { color: colors.foreground }]}>Adresse de la vidéo</Text>
+          <Text style={[styles.fieldHint, { color: colors.mutedForeground }]}>MP4 / HLS</Text>
+        </View>
+        <View style={[styles.inputWrap, { backgroundColor: colors.input, borderColor: colors.border }]}>
+          <Ionicons name="link-outline" size={18} color={colors.mutedForeground} />
+          <TextInput
+            testID="stream-url-input"
+            value={url}
+            onChangeText={setUrl}
+            placeholder="https://…/video.m3u8"
+            placeholderTextColor={colors.mutedForeground}
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="url"
+            returnKeyType="go"
+            onSubmitEditing={() => void openStream()}
+            style={[styles.input, { color: colors.foreground }]}
+          />
+          {url.length > 0 ? (
+            <Pressable
+              accessibilityLabel="Effacer l’adresse"
+              hitSlop={12}
+              onPress={() => setUrl('')}
+              style={({ pressed }) => [{ opacity: pressed ? 0.5 : 1 }]}
+            >
+              <Ionicons name="close-circle" size={18} color={colors.mutedForeground} />
+            </Pressable>
+          ) : null}
+        </View>
+        <View style={styles.actionRow}>
+          <Pressable
+            testID="open-stream-button"
+            onPress={() => void openStream()}
+            style={({ pressed }) => [
+              styles.openButton,
+              styles.playButton,
+              { backgroundColor: colors.primary, opacity: pressed ? 0.78 : 1 },
+            ]}
+          >
+            <Ionicons name="play" size={18} color={colors.primaryForeground} />
+            <Text style={[styles.openButtonText, { color: colors.primaryForeground }]}>Lire</Text>
+            <Feather name="arrow-up-right" size={17} color={colors.primaryForeground} />
+          </Pressable>
+          <Pressable
+            testID="download-button"
+            accessibilityLabel="Télécharger la vidéo pour la regarder hors ligne"
+            disabled={downloadState === 'working' || isLocalUri(activeUrl ?? '')}
+            onPress={() => void downloadSource()}
+            style={({ pressed }) => [
+              styles.openButton,
+              styles.downloadButton,
+              {
+                backgroundColor: colors.secondary,
+                borderColor: colors.border,
+                opacity: pressed || downloadState === 'working' ? 0.55 : 1,
+              },
+            ]}
+          >
+            <Ionicons name="download-outline" size={19} color={colors.secondaryForeground} />
+            <Text style={[styles.downloadButtonText, { color: colors.secondaryForeground }]}>
+              {downloadState === 'working' ? 'Téléchargement…' : 'Hors ligne'}
+            </Text>
+          </Pressable>
+        </View>
+      </View>
+
+      {downloadMessage ? (
+        <View style={[styles.downloadStatusCard, { backgroundColor: colors.secondary, borderColor: colors.border }]}>
+          <Ionicons name={downloadState === 'working' ? 'sync-outline' : 'checkmark-circle-outline'} size={18} color={colors.accent} />
+          <View style={styles.downloadStatusCopy}>
+            <Text style={[styles.downloadStatusText, { color: colors.secondaryForeground }]}>{downloadMessage}</Text>
+            {downloadState === 'working' ? (
+              <View style={[styles.progressTrack, { backgroundColor: colors.input }]}>
+                <View style={[styles.progressFill, { backgroundColor: colors.accent, width: `${downloadProgress ?? 4}%` }]} />
+              </View>
+            ) : null}
+            {downloadState === 'working' && downloadProgress !== null ? (
+              <Text style={[styles.progressBytes, { color: colors.mutedForeground }]}>{downloadProgress}%</Text>
+            ) : null}
+          </View>
+        </View>
+      ) : null}
+
+      {state === 'error' && errorMessage ? (
+        <View style={[styles.errorCard, { backgroundColor: colors.card, borderColor: colors.destructive }]}>
+          <View style={[styles.errorIcon, { backgroundColor: `${colors.destructive}20` }]}>
+            <Ionicons name="shield-outline" size={21} color={colors.destructive} />
+          </View>
+          <View style={styles.errorCopy}>
+            <Text style={[styles.errorTitle, { color: colors.foreground }]}>{errorTitle}</Text>
+            <Text style={[styles.errorText, { color: colors.mutedForeground }]}>
+              {errorMessage}{' '}
+              {signedUrlExpiry && signedUrlExpiry <= Date.now()
+                ? 'Collez un nouveau lien généré par le site source.'
+                : 'Le lecteur autonome ne passe pas par un relais serveur : le site source doit autoriser l’accès direct.'}
+            </Text>
+            <Pressable
+              onPress={() => setShowDetails((value) => !value)}
+              style={({ pressed }) => [{ opacity: pressed ? 0.6 : 1 }]}
+            >
+              <Text style={[styles.detailsLink, { color: colors.accent }]}>
+                {showDetails ? 'Masquer le diagnostic' : 'Voir le diagnostic'}
+              </Text>
+            </Pressable>
+            {showDetails ? (
+              <Text style={[styles.detailsText, { color: colors.mutedForeground }]}>
+                Les vidéos protégées, chiffrées ou limitées à une page web ne peuvent pas être récupérées par une app autonome.
+              </Text>
+            ) : null}
+          </View>
+        </View>
+      ) : null}
+
+      {history.length > 0 ? (
+        <View style={styles.historySection}>
+          <View style={styles.sectionHeader}>
+            <Text style={[styles.sectionTitle, { color: colors.foreground }]}>Récents</Text>
+            <Pressable onPress={() => void clearHistory()} style={({ pressed }) => [{ opacity: pressed ? 0.5 : 1 }]}>
+              <Text style={[styles.clearText, { color: colors.mutedForeground }]}>Effacer</Text>
+            </Pressable>
+          </View>
+          {history.map((item) => (
+            <Pressable
+              key={item}
+              testID={`recent-stream-${item}`}
+              onPress={() => void openStream(item)}
+              style={({ pressed }) => [
+                styles.historyRow,
+                { backgroundColor: colors.card, borderColor: colors.border, opacity: pressed ? 0.7 : 1 },
+              ]}
+            >
+              <View style={[styles.historyIcon, { backgroundColor: colors.secondary }]}>
+                <Ionicons name="play-circle-outline" size={20} color={colors.accent} />
+              </View>
+              <Text numberOfLines={1} style={[styles.historyText, { color: colors.foreground }]}>
+                {shortenUrl(item)}
+              </Text>
+              <Feather name="chevron-right" size={18} color={colors.mutedForeground} />
+            </Pressable>
+          ))}
+        </View>
+      ) : null}
+    </>
+  );
+
+  const renderOffline = () => (
+    <View style={styles.offlineContent}>
+      <View style={styles.offlineIntro}>
+        <View style={[styles.offlineIntroIcon, { backgroundColor: colors.secondary }]}>
+          <Ionicons name="cloud-offline-outline" size={28} color={colors.accent} />
+        </View>
+        <Text style={[styles.offlineTitle, { color: colors.foreground }]}>Vos vidéos, même sans réseau.</Text>
+        <Text style={[styles.offlineSubtitle, { color: colors.mutedForeground }]}>
+          Les vidéos téléchargées restent dans le stockage privé de cette app.
+        </Text>
+      </View>
+
+      {offlineVideos.length === 0 ? (
+        <View style={[styles.emptyOffline, { backgroundColor: colors.card, borderColor: colors.border }]}>
+          <Ionicons name="download-outline" size={28} color={colors.mutedForeground} />
+          <Text style={[styles.emptyOfflineTitle, { color: colors.foreground }]}>Aucune vidéo hors ligne</Text>
+          <Text style={[styles.emptyOfflineText, { color: colors.mutedForeground }]}>
+            Ouvrez l’onglet Lecture, collez un lien, puis appuyez sur Hors ligne.
+          </Text>
+          <Pressable
+            onPress={() => setActiveTab('playback')}
+            style={({ pressed }) => [styles.emptyOfflineButton, { backgroundColor: colors.primary, opacity: pressed ? 0.78 : 1 }]}
+          >
+            <Ionicons name="play" size={16} color={colors.primaryForeground} />
+            <Text style={[styles.emptyOfflineButtonText, { color: colors.primaryForeground }]}>Ajouter une vidéo</Text>
+          </Pressable>
+        </View>
+      ) : (
+        <View style={styles.offlineList}>
+          <View style={styles.sectionHeader}>
+            <Text style={[styles.sectionTitle, { color: colors.foreground }]}>{offlineVideos.length} vidéo{offlineVideos.length > 1 ? 's' : ''}</Text>
+            <Text style={[styles.clearText, { color: colors.mutedForeground }]}>Stockage privé</Text>
+          </View>
+          {offlineVideos.map((video) => (
+            <View key={video.id} style={[styles.offlineRow, { backgroundColor: colors.card, borderColor: colors.border }]}>
+              <Pressable
+                testID={`offline-video-${video.id}`}
+                onPress={() => void playOfflineVideo(video)}
+                style={({ pressed }) => [styles.offlineRowMain, { opacity: pressed ? 0.72 : 1 }]}
+              >
+                <View style={[styles.offlineThumbnail, { backgroundColor: colors.secondary }]}>
+                  <Ionicons name="play" size={22} color={colors.accent} />
+                </View>
+                <View style={styles.offlineCopy}>
+                  <Text numberOfLines={1} style={[styles.offlineFilename, { color: colors.foreground }]}>{video.filename}</Text>
+                  <Text style={[styles.offlineMeta, { color: colors.mutedForeground }]}>
+                    {formatBytes(video.size)} · {formatDate(video.createdAt)}
+                  </Text>
+                  <Text style={[styles.offlineFormat, { color: colors.accent }]}>
+                    {video.format === 'hls' ? 'Playlist HLS locale' : 'Fichier vidéo local'}
+                  </Text>
+                </View>
+                <Feather name="play-circle" size={22} color={colors.primary} />
+              </Pressable>
+              <Pressable
+                testID={`delete-offline-video-${video.id}`}
+                accessibilityLabel={`Supprimer ${video.filename}`}
+                hitSlop={10}
+                onPress={() => removeOfflineVideo(video)}
+                style={({ pressed }) => [styles.deleteOfflineButton, { opacity: pressed ? 0.5 : 1 }]}
+              >
+                <Ionicons name="trash-outline" size={18} color={colors.destructive} />
+              </Pressable>
+            </View>
+          ))}
+        </View>
+      )}
+    </View>
+  );
 
   return (
     <View style={[styles.screen, { backgroundColor: colors.background }]}>
-      <LinearGradient
-        colors={[colors.overlay, colors.background, colors.background]}
-        style={StyleSheet.absoluteFill}
-      />
+      <LinearGradient colors={[colors.overlay, colors.background, colors.background]} style={StyleSheet.absoluteFill} />
       <KeyboardAwareScrollViewCompat
         style={styles.scroll}
-        contentContainerStyle={{
-          paddingTop: insets.top + 20,
-          paddingBottom: insets.bottom + 30,
-        }}
+        contentContainerStyle={{ paddingTop: insets.top + 20, paddingBottom: insets.bottom + 30 }}
         bottomOffset={24}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
-        <View style={styles.header}>
-          <View style={styles.brandMark}>
-            <Ionicons name="play" size={20} color={colors.primaryForeground} />
-          </View>
-          <View style={styles.headerText}>
-            <Text style={[styles.eyebrow, { color: colors.accent }]}>LECTEUR HLS</Text>
-            <Text style={[styles.title, { color: colors.foreground }]}>Ouvrir un flux.</Text>
-          </View>
-          <View style={[styles.livePill, { backgroundColor: colors.secondary }]}>
-            <View style={[styles.liveDot, { backgroundColor: colors.accent }]} />
-            <Text style={[styles.liveText, { color: colors.secondaryForeground }]}>iOS ready</Text>
-          </View>
-        </View>
-
-        <Text style={[styles.subtitle, { color: colors.mutedForeground }]}>
-          Collez une adresse .m3u8. L’app utilise le lecteur vidéo natif de l’iPhone.
-        </Text>
-
-        <View style={[styles.playerShell, { borderColor: colors.border, backgroundColor: colors.card }]}>
-          {activeUrl ? (
-            <VideoView
-              player={player}
-              style={styles.video}
-              nativeControls
-              contentFit="contain"
-              allowsFullscreen
-              allowsPictureInPicture
-            />
-          ) : (
-            <View style={styles.emptyPlayer}>
-              <View style={[styles.emptyIcon, { backgroundColor: colors.secondary }]}>
-                <Ionicons name="play-outline" size={34} color={colors.primary} />
-              </View>
-              <Text style={[styles.emptyTitle, { color: colors.foreground }]}>Votre vidéo apparaîtra ici</Text>
-              <Text style={[styles.emptyText, { color: colors.mutedForeground }]}>
-                Le lecteur gère les flux HLS en direct et les vidéos `.m3u8`.
-              </Text>
-            </View>
-          )}
-          {activeUrl && state === 'loading' ? (
-            <View style={[styles.loadingBadge, { backgroundColor: colors.overlay }]}>
-              <Text style={[styles.loadingBadgeText, { color: colors.warning }]}>CHARGEMENT</Text>
-            </View>
-          ) : null}
-        </View>
-
-        <View style={styles.statusRow}>
-          <View style={[styles.statusDot, { backgroundColor: stateCopy.color }]} />
-          <Text style={[styles.statusText, { color: colors.mutedForeground }]}>{stateCopy.label}</Text>
-          {activeUrl ? (
-            <Text numberOfLines={1} style={[styles.activeLabel, { color: colors.foreground }]}>
-              {sourceLabel}
-            </Text>
-          ) : null}
-        </View>
-
-        <View style={[styles.formCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
-          <View style={styles.fieldHeader}>
-            <Text style={[styles.fieldLabel, { color: colors.foreground }]}>Adresse du flux</Text>
-            <Text style={[styles.fieldHint, { color: colors.mutedForeground }]}>HLS / M3U8</Text>
-          </View>
-          <View style={[styles.inputWrap, { backgroundColor: colors.input, borderColor: colors.border }]}>
-            <Ionicons name="link-outline" size={18} color={colors.mutedForeground} />
-            <TextInput
-              testID="stream-url-input"
-              value={url}
-              onChangeText={setUrl}
-              placeholder="https://…/video.m3u8"
-              placeholderTextColor={colors.mutedForeground}
-              autoCapitalize="none"
-              autoCorrect={false}
-              keyboardType="url"
-              returnKeyType="go"
-              onSubmitEditing={() => void openStream()}
-              style={[styles.input, { color: colors.foreground }]}
-            />
-            {url.length > 0 ? (
-              <Pressable
-                accessibilityLabel="Effacer l’adresse"
-                hitSlop={12}
-                onPress={() => setUrl('')}
-                style={({ pressed }) => [{ opacity: pressed ? 0.5 : 1 }]}
-              >
-                <Ionicons name="close-circle" size={18} color={colors.mutedForeground} />
-              </Pressable>
-            ) : null}
-          </View>
-          <View style={styles.actionRow}>
-            <Pressable
-              testID="open-stream-button"
-              onPress={() => void openStream()}
-              style={({ pressed }) => [
-                styles.openButton,
-                styles.playButton,
-                { backgroundColor: colors.primary, opacity: pressed ? 0.78 : 1 },
-              ]}
-            >
-              <Ionicons name="play" size={18} color={colors.primaryForeground} />
-              <Text style={[styles.openButtonText, { color: colors.primaryForeground }]}>Lire le flux</Text>
-              <Feather name="arrow-up-right" size={17} color={colors.primaryForeground} />
-            </Pressable>
-            <Pressable
-              testID="download-button"
-              accessibilityLabel="Télécharger le flux"
-              onPress={() => {
-                setDownloadMessage(null);
-                setShowDownloadOptions(true);
-              }}
-              style={({ pressed }) => [
-                styles.openButton,
-                styles.downloadButton,
-                { backgroundColor: colors.secondary, borderColor: colors.border, opacity: pressed ? 0.72 : 1 },
-              ]}
-            >
-              <Ionicons name="download-outline" size={19} color={colors.secondaryForeground} />
-              <Text style={[styles.downloadButtonText, { color: colors.secondaryForeground }]}>Télécharger</Text>
-            </Pressable>
-          </View>
-        </View>
-
-        <Modal
-          visible={showDownloadOptions}
-          transparent
-          animationType="slide"
-          onRequestClose={() => setShowDownloadOptions(false)}
-        >
-          <View style={[styles.modalBackdrop, { backgroundColor: colors.overlay }]}>
-            <Pressable
-              accessibilityLabel="Fermer les options de téléchargement"
-              onPress={() => setShowDownloadOptions(false)}
-              style={StyleSheet.absoluteFill}
-            />
-            <View
-              style={[
-                styles.downloadSheet,
-                {
-                  backgroundColor: colors.card,
-                  borderColor: colors.border,
-                  paddingBottom: insets.bottom + 16,
-                },
-              ]}
-            >
-              <View style={[styles.sheetHandle, { backgroundColor: colors.border }]} />
-              <View style={styles.sheetHeader}>
-                <View style={[styles.sheetIcon, { backgroundColor: colors.secondary }]}>
-                  <Ionicons name="download-outline" size={21} color={colors.accent} />
-                </View>
-                <View style={styles.sheetHeaderCopy}>
-                  <Text style={[styles.sheetTitle, { color: colors.foreground }]}>Télécharger le flux</Text>
-                  <Text numberOfLines={1} style={[styles.sheetSubtitle, { color: colors.mutedForeground }]}>
-                    {shortenUrl(activeUrl ?? url)}
-                  </Text>
-                </View>
-                <Pressable
-                  accessibilityLabel="Fermer"
-                  hitSlop={12}
-                  onPress={() => setShowDownloadOptions(false)}
-                  style={({ pressed }) => [{ opacity: pressed ? 0.5 : 1 }]}
-                >
-                  <Ionicons name="close" size={22} color={colors.mutedForeground} />
-                </Pressable>
-              </View>
-
-              <Text style={[styles.sheetHint, { color: colors.mutedForeground }]}>
-                Choisissez d’abord la résolution, puis la méthode de téléchargement.
-              </Text>
-              <Text style={[styles.qualityLabel, { color: colors.foreground }]}>Qualité vidéo</Text>
-              <View style={styles.qualityGrid}>
-                {QUALITY_OPTIONS.map((option) => {
-                  const isSelected = selectedQuality === option.value;
-                  return (
-                    <Pressable
-                      key={option.value}
-                      testID={`quality-${option.value}`}
-                      disabled={downloadState === 'working'}
-                      onPress={() => {
-                        setSelectedQuality(option.value);
-                        void Haptics.selectionAsync();
-                      }}
-                      style={({ pressed }) => [
-                        styles.qualityChip,
-                        {
-                          backgroundColor: isSelected ? colors.primary : colors.input,
-                          borderColor: isSelected ? colors.primary : colors.border,
-                          opacity: pressed || downloadState === 'working' ? 0.7 : 1,
-                        },
-                      ]}
-                    >
-                      <Text style={[styles.qualityChipLabel, { color: isSelected ? colors.primaryForeground : colors.foreground }]}>
-                        {option.label}
-                      </Text>
-                      <Text style={[styles.qualityChipHint, { color: isSelected ? colors.primaryForeground : colors.mutedForeground }]}>
-                        {option.hint}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
-              {downloadMessage ? (
-                <View style={[styles.downloadNotice, { backgroundColor: colors.secondary, borderColor: colors.border }]}>
-                  <Ionicons
-                    name={downloadState === 'working' ? 'sync-outline' : 'download-outline'}
-                    size={17}
-                    color={colors.accent}
-                  />
-                  <Text style={[styles.downloadNoticeText, { color: colors.secondaryForeground }]}>
-                    {downloadMessage}
-                  </Text>
-                </View>
-              ) : null}
-              {downloadState === 'working' || downloadState === 'browser' ? (
-                <View style={styles.progressBlock}>
-                  <View style={styles.progressMeta}>
-                    <Text style={[styles.progressLabel, { color: colors.mutedForeground }]}>
-                      {downloadState === 'browser'
-                        ? 'Téléchargement géré par Safari'
-                        : downloadProgress === null
-                          ? 'Conversion / préparation'
-                          : 'Réception du fichier'}
-                    </Text>
-                    <Text style={[styles.progressValue, { color: colors.foreground }]}>
-                      {downloadProgress === null ? '…' : `${downloadProgress}%`}
-                    </Text>
-                  </View>
-                  <View style={[styles.progressTrack, { backgroundColor: colors.input }]}>
-                    <View
-                      style={[
-                        styles.progressFill,
-                        {
-                          backgroundColor: colors.accent,
-                          width: `${downloadProgress ?? 35}%`,
-                        },
-                      ]}
-                    />
-                  </View>
-                  {downloadBytes && downloadBytes.total > 0 ? (
-                    <Text style={[styles.progressBytes, { color: colors.mutedForeground }]}>
-                      {formatBytes(downloadBytes.written)} sur {formatBytes(downloadBytes.total)}
-                    </Text>
-                  ) : null}
-                  <Text style={[styles.progressEta, { color: colors.mutedForeground }]}>
-                    {downloadState === 'browser'
-                      ? 'Safari calcule la durée restante.'
-                      : downloadEtaSeconds === null
-                        ? 'Estimation du temps restant…'
-                        : downloadEtaSeconds === 0
-                          ? 'Fichier reçu.'
-                          : `Temps restant estimé : ${formatRemainingTime(downloadEtaSeconds)}`}
-                  </Text>
-                </View>
-              ) : null}
-
-              <Pressable
-                testID="mp4-download-option"
-              disabled={downloadState === 'working'}
-                onPress={() => void downloadSource('mp4')}
-                style={({ pressed }) => [
-                  styles.downloadOption,
-                  { borderColor: colors.border, backgroundColor: colors.input, opacity: pressed ? 0.72 : 1 },
-                ]}
-              >
-                <View style={[styles.optionIcon, { backgroundColor: colors.secondary }]}>
-                  <Ionicons name="videocam-outline" size={20} color={colors.accent} />
-                </View>
-                <View style={styles.optionCopy}>
-                  <Text style={[styles.optionTitle, { color: colors.foreground }]}>
-                    {downloadState === 'working' ? 'Conversion MP4…' : 'Télécharger en MP4'}
-                  </Text>
-                  <Text style={[styles.optionDescription, { color: colors.mutedForeground }]}>
-                     Convertit le flux en MP4 compatible ({selectedQuality === 'original' ? 'meilleure qualité disponible' : selectedQuality + 'p'}), puis ouvre le menu iOS pour l’enregistrer.
-                  </Text>
-                </View>
-                <Feather name="chevron-right" size={18} color={colors.mutedForeground} />
-              </Pressable>
-
-              <Pressable
-                testID="fast-mp4-download-option"
-                disabled={downloadState === 'working'}
-                onPress={() => void downloadSource('fast')}
-                style={({ pressed }) => [
-                  styles.downloadOption,
-                  { borderColor: colors.border, backgroundColor: colors.input, opacity: pressed ? 0.72 : 1 },
-                ]}
-              >
-                <View style={[styles.optionIcon, { backgroundColor: colors.secondary }]}>
-                  <Ionicons name="flash-outline" size={20} color={colors.accent} />
-                </View>
-                <View style={styles.optionCopy}>
-                  <Text style={[styles.optionTitle, { color: colors.foreground }]}>MP4 rapide</Text>
-                  <Text style={[styles.optionDescription, { color: colors.mutedForeground }]}>
-                    Téléchargement rapide en {selectedQuality === 'original' ? 'qualité originale' : selectedQuality + 'p'}, sans réencodage si possible.
-                  </Text>
-                </View>
-                <Feather name="chevron-right" size={18} color={colors.mutedForeground} />
-              </Pressable>
-
-              <Pressable
-                testID="browser-download-option"
-                onPress={() => void downloadSource('browser')}
-                style={({ pressed }) => [
-                  styles.downloadOption,
-                  { borderColor: colors.border, backgroundColor: colors.input, opacity: pressed ? 0.72 : 1 },
-                ]}
-              >
-                <View style={[styles.optionIcon, { backgroundColor: colors.secondary }]}>
-                  <Ionicons name="globe-outline" size={20} color={colors.accent} />
-                </View>
-                <View style={styles.optionCopy}>
-                  <Text style={[styles.optionTitle, { color: colors.foreground }]}>Ouvrir dans Safari</Text>
-                  <Text style={[styles.optionDescription, { color: colors.mutedForeground }]}>
-                    À utiliser si le site propose son propre bouton de téléchargement.
-                  </Text>
-                </View>
-                <Feather name="chevron-right" size={18} color={colors.mutedForeground} />
-              </Pressable>
-
-              <Pressable
-                testID="share-download-option"
-                onPress={() => void downloadSource('share')}
-                style={({ pressed }) => [
-                  styles.downloadOption,
-                  { borderColor: colors.border, backgroundColor: colors.input, opacity: pressed ? 0.72 : 1 },
-                ]}
-              >
-                <View style={[styles.optionIcon, { backgroundColor: colors.secondary }]}>
-                  <Ionicons name="share-outline" size={20} color={colors.accent} />
-                </View>
-                <View style={styles.optionCopy}>
-                  <Text style={[styles.optionTitle, { color: colors.foreground }]}>Partager le lien</Text>
-                  <Text style={[styles.optionDescription, { color: colors.mutedForeground }]}>
-                    Envoie l’adresse vers une autre app ou un gestionnaire de téléchargement.
-                  </Text>
-                </View>
-                <Feather name="chevron-right" size={18} color={colors.mutedForeground} />
-              </Pressable>
-            </View>
-          </View>
-        </Modal>
-
-        {downloadMessage && !showDownloadOptions ? (
-          <View style={[styles.downloadStatusCard, { backgroundColor: colors.secondary, borderColor: colors.border }]}>
-            <Ionicons name="download-outline" size={18} color={colors.accent} />
-            <View style={styles.downloadStatusCopy}>
-              <Text style={[styles.downloadStatusText, { color: colors.secondaryForeground }]}>
-                {downloadMessage}
-              </Text>
-              {downloadState === 'working' || downloadState === 'browser' ? (
-                <View style={styles.progressBlock}>
-                  <View style={[styles.progressTrack, { backgroundColor: colors.input }]}>
-                    <View
-                      style={[
-                        styles.progressFill,
-                        {
-                          backgroundColor: colors.accent,
-                          width: `${downloadProgress ?? 35}%`,
-                        },
-                      ]}
-                    />
-                  </View>
-                  {downloadProgress !== null ? (
-                    <Text style={[styles.progressBytes, { color: colors.mutedForeground }]}>
-                      {downloadProgress}%{downloadEtaSeconds !== null && downloadEtaSeconds > 0
-                        ? ` · encore ${formatRemainingTime(downloadEtaSeconds)}`
-                        : ''}
-                    </Text>
-                  ) : null}
-                </View>
-              ) : null}
-            </View>
-          </View>
-        ) : null}
-
-        {state === 'error' && errorMessage ? (
-          <View style={[styles.errorCard, { backgroundColor: colors.card, borderColor: colors.destructive }]}>
-            <View style={[styles.errorIcon, { backgroundColor: `${colors.destructive}20` }]}>
-              <Ionicons name="shield-outline" size={21} color={colors.destructive} />
-            </View>
-            <View style={styles.errorCopy}>
-              <Text style={[styles.errorTitle, { color: colors.foreground }]}>{errorTitle}</Text>
-              <Text style={[styles.errorText, { color: colors.mutedForeground }]}>
-                 {errorMessage}{' '}
-                {signedUrlExpiry && signedUrlExpiry <= Date.now()
-                  ? 'Collez un nouveau lien généré par le site source : une signature expirée ne peut pas être renouvelée par le lecteur.'
-                   : 'L’app conserve les paramètres du lien et relaie les playlists pour que les variantes et les segments restent accessibles.'}
-              </Text>
-              <Pressable
-                onPress={() => setShowDetails((value) => !value)}
-                style={({ pressed }) => [{ opacity: pressed ? 0.6 : 1 }]}
-              >
-                <Text style={[styles.detailsLink, { color: colors.accent }]}>
-                  {showDetails ? 'Masquer le diagnostic' : 'Voir le diagnostic'}
-                </Text>
-              </Pressable>
-              {showDetails ? (
-                <Text style={[styles.detailsText, { color: colors.mutedForeground }]}>
-                  Essayez un lien encore valide généré par Sibnet. Si le lien fonctionne seulement depuis leur page web, il faut un relais autorisé côté serveur.
-                </Text>
-              ) : null}
-            </View>
-          </View>
-        ) : null}
-
-        {history.length > 0 ? (
-          <View style={styles.historySection}>
-            <View style={styles.sectionHeader}>
-              <Text style={[styles.sectionTitle, { color: colors.foreground }]}>Récents</Text>
-              <Pressable onPress={() => void clearHistory()} style={({ pressed }) => [{ opacity: pressed ? 0.5 : 1 }]}>
-                <Text style={[styles.clearText, { color: colors.mutedForeground }]}>Effacer</Text>
-              </Pressable>
-            </View>
-            {history.map((item) => (
-              <Pressable
-                key={item}
-                testID={`recent-stream-${item}`}
-                onPress={() => void openStream(item)}
-                style={({ pressed }) => [
-                  styles.historyRow,
-                  { backgroundColor: colors.card, borderColor: colors.border, opacity: pressed ? 0.7 : 1 },
-                ]}
-              >
-                <View style={[styles.historyIcon, { backgroundColor: colors.secondary }]}>
-                  <Ionicons name="play-circle-outline" size={20} color={colors.accent} />
-                </View>
-                <Text numberOfLines={1} style={[styles.historyText, { color: colors.foreground }]}>
-                  {shortenUrl(item)}
-                </Text>
-                <Feather name="chevron-right" size={18} color={colors.mutedForeground} />
-              </Pressable>
-            ))}
-          </View>
-        ) : null}
-
+        {renderHeader()}
+        {activeTab === 'playback' ? renderPlayer() : <ScrollView scrollEnabled={false}>{renderOffline()}</ScrollView>}
         <View style={styles.footer}>
           <Ionicons name="lock-closed-outline" size={13} color={colors.mutedForeground} />
           <Text style={[styles.footerText, { color: colors.mutedForeground }]}>
-            Lecture locale · aucun lien envoyé ailleurs
+            Vidéos conservées uniquement sur cet appareil
           </Text>
         </View>
       </KeyboardAwareScrollViewCompat>
@@ -885,10 +878,14 @@ const styles = StyleSheet.create({
   },
   headerText: { flex: 1, marginLeft: 14 },
   eyebrow: { fontSize: 11, fontFamily: 'Inter_700Bold', letterSpacing: 1.4 },
-  title: { fontSize: 26, lineHeight: 31, fontFamily: 'Inter_700Bold', letterSpacing: -0.8 },
-  livePill: { flexDirection: 'row', alignItems: 'center', borderRadius: 999, paddingHorizontal: 10, paddingVertical: 7 },
-  liveDot: { width: 6, height: 6, borderRadius: 3, marginRight: 6 },
+  title: { fontSize: 25, lineHeight: 31, fontFamily: 'Inter_700Bold', letterSpacing: -0.8 },
+  offlinePill: { flexDirection: 'row', alignItems: 'center', borderRadius: 999, paddingHorizontal: 10, paddingVertical: 7, gap: 5 },
   liveText: { fontSize: 11, fontFamily: 'Inter_600SemiBold' },
+  tabs: { flexDirection: 'row', borderWidth: 1, borderRadius: 17, marginHorizontal: 18, marginTop: 22, padding: 4 },
+  tab: { flex: 1, minHeight: 44, borderRadius: 13, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7 },
+  tabText: { fontSize: 13, fontFamily: 'Inter_700Bold' },
+  countBadge: { minWidth: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 5 },
+  countText: { fontSize: 10, fontFamily: 'Inter_700Bold' },
   subtitle: { fontSize: 14, lineHeight: 21, marginTop: 16, marginBottom: 20, paddingHorizontal: 22 },
   playerShell: { marginHorizontal: 18, borderWidth: 1, borderRadius: 24, overflow: 'hidden', aspectRatio: 16 / 10 },
   video: { flex: 1, backgroundColor: '#080a12' },
@@ -914,38 +911,12 @@ const styles = StyleSheet.create({
   downloadButton: { paddingHorizontal: 14, borderWidth: 1, gap: 7 },
   openButtonText: { fontSize: 15, fontFamily: 'Inter_700Bold' },
   downloadButtonText: { fontSize: 13, fontFamily: 'Inter_700Bold' },
-  modalBackdrop: { flex: 1, justifyContent: 'flex-end' },
-  downloadSheet: { borderTopLeftRadius: 28, borderTopRightRadius: 28, borderTopWidth: 1, paddingHorizontal: 18, paddingTop: 10 },
-  sheetHandle: { width: 38, height: 4, borderRadius: 2, alignSelf: 'center', marginBottom: 18 },
-  sheetHeader: { flexDirection: 'row', alignItems: 'center' },
-  sheetIcon: { width: 42, height: 42, borderRadius: 14, alignItems: 'center', justifyContent: 'center', marginRight: 11 },
-  sheetHeaderCopy: { flex: 1 },
-  sheetTitle: { fontSize: 18, fontFamily: 'Inter_700Bold' },
-  sheetSubtitle: { fontSize: 11, marginTop: 3, fontFamily: 'Inter_500Medium' },
-  sheetHint: { fontSize: 12, lineHeight: 18, marginTop: 14, marginBottom: 12 },
-  qualityLabel: { fontSize: 13, fontFamily: 'Inter_700Bold', marginBottom: 8 },
-  qualityGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 12 },
-  qualityChip: { minWidth: 72, borderRadius: 13, borderWidth: 1, paddingHorizontal: 10, paddingVertical: 8, alignItems: 'center' },
-  qualityChipLabel: { fontSize: 12, fontFamily: 'Inter_700Bold' },
-  qualityChipHint: { fontSize: 10, marginTop: 2, fontFamily: 'Inter_500Medium' },
-  downloadNotice: { flexDirection: 'row', alignItems: 'center', borderRadius: 13, borderWidth: 1, paddingHorizontal: 11, paddingVertical: 9, marginBottom: 10, gap: 8 },
-  downloadNoticeText: { flex: 1, fontSize: 12, lineHeight: 17, fontFamily: 'Inter_500Medium' },
-  progressBlock: { marginBottom: 10 },
-  progressMeta: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
-  progressLabel: { fontSize: 11, fontFamily: 'Inter_500Medium' },
-  progressValue: { fontSize: 11, fontFamily: 'Inter_700Bold' },
-  progressTrack: { height: 7, borderRadius: 999, overflow: 'hidden' },
-  progressFill: { height: '100%', borderRadius: 999 },
-  progressBytes: { fontSize: 10, marginTop: 5, fontFamily: 'Inter_400Regular' },
-  progressEta: { fontSize: 10, marginTop: 3, fontFamily: 'Inter_500Medium' },
   downloadStatusCard: { marginHorizontal: 18, marginTop: 12, borderRadius: 16, borderWidth: 1, flexDirection: 'row', alignItems: 'flex-start', paddingHorizontal: 13, paddingVertical: 11, gap: 8 },
   downloadStatusCopy: { flex: 1 },
   downloadStatusText: { flex: 1, fontSize: 12, lineHeight: 17, fontFamily: 'Inter_500Medium' },
-  downloadOption: { minHeight: 72, borderRadius: 17, borderWidth: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 11, paddingVertical: 10, marginBottom: 8 },
-  optionIcon: { width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginRight: 10 },
-  optionCopy: { flex: 1, paddingRight: 8 },
-  optionTitle: { fontSize: 13, fontFamily: 'Inter_700Bold' },
-  optionDescription: { fontSize: 11, lineHeight: 16, marginTop: 3 },
+  progressTrack: { height: 7, borderRadius: 999, overflow: 'hidden', marginTop: 9 },
+  progressFill: { height: '100%', borderRadius: 999 },
+  progressBytes: { fontSize: 10, marginTop: 5, fontFamily: 'Inter_400Regular' },
   errorCard: { marginHorizontal: 18, borderWidth: 1, borderRadius: 20, padding: 15, flexDirection: 'row' },
   errorIcon: { width: 38, height: 38, borderRadius: 13, alignItems: 'center', justifyContent: 'center', marginRight: 11 },
   errorCopy: { flex: 1 },
@@ -960,6 +931,25 @@ const styles = StyleSheet.create({
   historyRow: { flexDirection: 'row', alignItems: 'center', minHeight: 58, borderWidth: 1, borderRadius: 17, paddingHorizontal: 11, marginBottom: 8 },
   historyIcon: { width: 34, height: 34, borderRadius: 11, alignItems: 'center', justifyContent: 'center', marginRight: 10 },
   historyText: { flex: 1, fontSize: 12, fontFamily: 'Inter_500Medium' },
+  offlineContent: { paddingHorizontal: 18, paddingTop: 24 },
+  offlineIntro: { alignItems: 'center', paddingHorizontal: 20, marginBottom: 24 },
+  offlineIntroIcon: { width: 62, height: 62, borderRadius: 22, alignItems: 'center', justifyContent: 'center', marginBottom: 13 },
+  offlineTitle: { fontSize: 20, textAlign: 'center', fontFamily: 'Inter_700Bold', letterSpacing: -0.4 },
+  offlineSubtitle: { fontSize: 13, lineHeight: 19, textAlign: 'center', marginTop: 7 },
+  emptyOffline: { borderWidth: 1, borderRadius: 22, alignItems: 'center', paddingHorizontal: 24, paddingVertical: 34 },
+  emptyOfflineTitle: { fontSize: 16, fontFamily: 'Inter_700Bold', marginTop: 12 },
+  emptyOfflineText: { fontSize: 13, lineHeight: 19, textAlign: 'center', marginTop: 7 },
+  emptyOfflineButton: { minHeight: 46, borderRadius: 14, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, gap: 8, marginTop: 18 },
+  emptyOfflineButtonText: { fontSize: 13, fontFamily: 'Inter_700Bold' },
+  offlineList: { marginBottom: 4 },
+  offlineRow: { borderWidth: 1, borderRadius: 18, flexDirection: 'row', alignItems: 'center', padding: 10, marginBottom: 9 },
+  offlineRowMain: { flex: 1, flexDirection: 'row', alignItems: 'center' },
+  offlineThumbnail: { width: 58, height: 58, borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginRight: 11 },
+  offlineCopy: { flex: 1, paddingRight: 8 },
+  offlineFilename: { fontSize: 13, fontFamily: 'Inter_700Bold' },
+  offlineMeta: { fontSize: 10, marginTop: 5, fontFamily: 'Inter_400Regular' },
+  offlineFormat: { fontSize: 10, marginTop: 4, fontFamily: 'Inter_600SemiBold' },
+  deleteOfflineButton: { width: 34, height: 42, alignItems: 'center', justifyContent: 'center' },
   footer: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginTop: 28, gap: 5 },
   footerText: { fontSize: 11, fontFamily: 'Inter_400Regular' },
 });

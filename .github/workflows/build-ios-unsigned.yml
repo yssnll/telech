@@ -1,13 +1,10 @@
-name: Build unsigned iOS IPA
+name: Build iOS IPA
 
 on:
   workflow_dispatch:
-    inputs:
-      api_domain:
-        description: "URL publique de l'application publiée, par exemple https://mon-app.replit.app"
-        required: true
-        type: string
   push:
+    branches:
+      - main
     tags:
       - "v*"
 
@@ -41,15 +38,7 @@ jobs:
 
       - name: Generate the native iOS project
         working-directory: artifacts/hls-video-player
-        env:
-          EXPO_PUBLIC_DOMAIN: ${{ inputs.api_domain || vars.EXPO_PUBLIC_DOMAIN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${EXPO_PUBLIC_DOMAIN:-}" ]; then
-            echo "::error::Set the public API URL in the api_domain workflow input or the EXPO_PUBLIC_DOMAIN repository variable."
-            exit 1
-          fi
-          pnpm exec expo prebuild --platform ios --no-install --non-interactive
+        run: pnpm exec expo prebuild --platform ios --no-install --non-interactive
 
       - name: Install CocoaPods dependencies
         working-directory: artifacts/hls-video-player/ios
@@ -90,9 +79,9 @@ jobs:
             "$GITHUB_WORKSPACE/HLSVideoPlayer-unsigned.ipa"
 
           {
-            echo "## Unsigned iOS build"
+            echo "## iOS build"
             echo
-            echo "The IPA was intentionally built with code signing disabled."
+            echo "The IPA was built automatically with code signing disabled."
             echo
             echo "It cannot be installed directly on an iPhone until it is signed with an Apple certificate and provisioning profile."
           } >> "$GITHUB_STEP_SUMMARY"

@@ -50,9 +50,15 @@ Dans Xcode :
 5. Utiliser **Product > Archive**.
 6. Dans l’Organizer, choisir **Distribute App** pour exporter l’IPA ou l’envoyer vers TestFlight.
 
-## API nécessaire
+## Fonctionnement autonome
 
-L’application utilise `EXPO_PUBLIC_DOMAIN` pour joindre le serveur API. Avant de lancer une version distribuée, le serveur situé dans `artifacts/api-server/` doit être déployé publiquement et cette variable doit pointer vers son domaine.
+L’application mobile n’utilise plus le serveur API pour lire ou télécharger une vidéo.
+Les fichiers MP4 sont téléchargés directement dans le stockage privé de l’app. Pour
+une playlist HLS non chiffrée, l’app télécharge les segments et crée une playlist
+`.m3u8` locale. Les vidéos apparaissent ensuite dans l’onglet **Hors ligne**.
+
+Les flux chiffrés, les liens expirés et les vidéos accessibles uniquement derrière
+une page web ne peuvent pas être récupérés par une application autonome.
 
 ## Limitation de l’environnement Replit
 
