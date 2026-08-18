@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       api_domain:
-        description: "Domaine public de l’application Replit qui expose /api"
-        required: true
+        description: "Domaine public qui expose /api/downloads/mp4 pour les conversions HLS"
+        required: false
         type: string
   push:
     branches:
@@ -17,76 +17,33 @@ permissions:
   contents: read
 
 env:
-  # For push builds, set EXPO_PUBLIC_DOMAIN as a GitHub Actions repository
-  # variable. Manual runs can provide the same value through api_domain.
-  EXPO_PUBLIC_DOMAIN: ${{ inputs.api_domain || vars.EXPO_PUBLIC_DOMAIN }}
+  API_BASE_URL: ${{ inputs.api_domain || vars.API_BASE_URL }}
 
 jobs:
   build-unsigned-ipa:
     name: Build unsigned IPA
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 30
 
     steps:
-      - name: Check out repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate conversion API domain
-        run: |
-          if [ -z "${EXPO_PUBLIC_DOMAIN:-}" ]; then
-            echo "Missing EXPO_PUBLIC_DOMAIN. Run this workflow manually with api_domain, or define the repository variable EXPO_PUBLIC_DOMAIN."
-            exit 1
-          fi
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10
-          run_install: false
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-
-      - name: Install JavaScript dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Verify the native HLS module source
-        run: |
-          test -f artifacts/hls-video-player/modules/offline-hls/package.json
-          test -f artifacts/hls-video-player/modules/offline-hls/OfflineHls.podspec
-          test -f artifacts/hls-video-player/modules/offline-hls/expo-module.config.json
-          test -f artifacts/hls-video-player/modules/offline-hls/ios/OfflineHlsModule.swift
-
-      - name: Generate the native iOS project
-        working-directory: artifacts/hls-video-player
-        run: pnpm exec expo prebuild --platform ios --no-install --non-interactive
-
-      - name: Install CocoaPods dependencies
-        working-directory: artifacts/hls-video-player/ios
-        run: pod install
-
-      - name: Verify Expo linked OfflineHls
-        working-directory: artifacts/hls-video-player
-        run: |
-          if ! grep -R -E "OfflineHls(Module|AppDelegateSubscriber)" ios/Pods ios/*.xcodeproj 2>/dev/null; then
-            echo "OfflineHls was not linked into the generated iOS project."
-            echo "This IPA would not contain the native HLS module."
-            exit 1
-          fi
+      - name: Show Xcode version
+        run: xcodebuild -version
 
       - name: Archive without code signing
-        working-directory: artifacts/hls-video-player
         run: |
+          set -euo pipefail
+          mkdir -p build
           xcodebuild \
-            -workspace ios/HLSVideoPlayer.xcworkspace \
-            -scheme HLSVideoPlayer \
+            -project Telech.xcodeproj \
+            -scheme Telech \
             -configuration Release \
+            -sdk iphoneos \
             -destination "generic/platform=iOS" \
-            -archivePath "$RUNNER_TEMP/HLSVideoPlayer.xcarchive" \
-            -derivedDataPath "$RUNNER_TEMP/HLSVideoPlayer-DerivedData" \
+            -archivePath "$RUNNER_TEMP/Telech.xcarchive" \
+            API_BASE_URL="${API_BASE_URL:-}" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -94,35 +51,31 @@ jobs:
             archive
 
       - name: Package the unsigned app as an IPA
-        working-directory: artifacts/hls-video-player
         run: |
           set -euo pipefail
-
-          app_path="$RUNNER_TEMP/HLSVideoPlayer.xcarchive/Products/Applications/HLSVideoPlayer.app"
-          ipa_dir="$RUNNER_TEMP/unsigned-ipa"
-
+          app_path="$RUNNER_TEMP/Telech.xcarchive/Products/Applications/Telech.app"
+          ipa_dir="$RUNNER_TEMP/telech-unsigned-ipa"
           test -d "$app_path"
           rm -rf "$ipa_dir"
           mkdir -p "$ipa_dir/Payload"
           cp -R "$app_path" "$ipa_dir/Payload/"
-
           cd "$ipa_dir"
           ditto -c -k --sequesterRsrc --keepParent \
             Payload \
-            "$GITHUB_WORKSPACE/HLSVideoPlayer-unsigned.ipa"
+            "$GITHUB_WORKSPACE/Telech-unsigned.ipa"
 
           {
             echo "## iOS build"
             echo
-            echo "The IPA was built automatically with code signing disabled."
+            echo "The IPA was built without Apple code signing."
             echo
-            echo "It cannot be installed directly on an iPhone until it is signed with an Apple certificate and provisioning profile."
+            echo "It must be signed with an Apple certificate and provisioning profile before installation on a real iPhone."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: hls-video-player-unsigned-ipa
-          path: HLSVideoPlayer-unsigned.ipa
+          name: telech-unsigned-ipa
+          path: Telech-unsigned.ipa
           if-no-files-found: error
           retention-days: 14
