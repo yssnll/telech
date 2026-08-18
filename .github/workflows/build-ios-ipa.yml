@@ -1,0 +1,67 @@
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - ipa-autonome
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios-ipa:
+    name: Compile iOS IPA
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.26.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate the native iOS project
+        run: pnpm exec expo prebuild --platform ios --no-install
+
+      - name: Install CocoaPods dependencies
+        run: pod install --project-directory=ios
+
+      - name: Archive the iOS app
+        run: |
+          xcodebuild \
+            -workspace ios/HLSVideoPlayer.xcworkspace \
+            -scheme HLSVideoPlayer \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath ios/build/HLSVideoPlayer.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            archive
+
+      - name: Package the unsigned IPA
+        run: |
+          set -euo pipefail
+          rm -rf ios/build/ipa
+          mkdir -p ios/build/ipa/Payload
+          cp -R ios/build/HLSVideoPlayer.xcarchive/Products/Applications/HLSVideoPlayer.app ios/build/ipa/Payload/
+          (cd ios/build/ipa && zip -qry ../HLSVideoPlayer-unsigned.ipa Payload)
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HLSVideoPlayer-unsigned-ipa
+          path: ios/build/HLSVideoPlayer-unsigned.ipa
+          if-no-files-found: error

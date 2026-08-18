@@ -44,6 +44,27 @@ Le dossier `ios/` est généré par `expo prebuild` et n’est volontairement pa
 inclus dans le ZIP : il dépend de Xcode et de la machine qui signe
 l’application.
 
+## Compilation automatique avec GitHub Actions
+
+Le fichier `.github/workflows/build-ios-ipa.yml` compile automatiquement
+l’application sur un runner macOS lorsque la branche `main` ou `ipa-autonome`
+est mise à jour. Il peut aussi être lancé manuellement depuis l’onglet
+**Actions** avec **Run workflow**.
+
+La workflow :
+
+1. installe Node.js, pnpm et les dépendances JavaScript ;
+2. génère le projet iOS avec Expo ;
+3. installe les dépendances CocoaPods ;
+4. archive l’application en Release avec Xcode ;
+5. crée `HLSVideoPlayer-unsigned.ipa` ;
+6. publie l’IPA dans les **Artifacts** du run GitHub Actions.
+
+Cette version est compilée sans signature Apple afin de ne demander aucun
+certificat ou secret Apple dans GitHub. Une IPA non signée ne peut pas être
+installée directement sur un iPhone ; elle doit ensuite être signée avec ton
+équipe Apple dans Xcode ou via une workflow de signature dédiée.
+
 ## Ce qui est inclus
 
 - l’interface du lecteur vidéo ;
