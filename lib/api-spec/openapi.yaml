@@ -24,6 +24,95 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /downloads/mp4:
+    get:
+      operationId: downloadHlsAsMp4
+      tags: [downloads]
+      summary: Convert an HLS stream to MP4
+      description: Downloads a signed HLS playlist, converts it to a phone-compatible MP4, and returns the file.
+      parameters:
+        - name: url
+          in: query
+          required: true
+          description: Public HTTP(S) URL of the HLS playlist.
+          schema:
+            type: string
+        - name: mode
+          in: query
+          required: false
+          description: Fast remux when the source codecs are MP4-compatible, or a broader compatibility conversion.
+          schema:
+            type: string
+            enum: [compatible, fast]
+            default: compatible
+        - name: quality
+          in: query
+          required: false
+          description: Maximum output height. The closest available HLS variant is selected without upscaling.
+          schema:
+            type: string
+            enum: [original, "360", "480", "720", "1080"]
+            default: original
+      responses:
+        "200":
+          description: Converted MP4 video
+          content:
+            video/mp4:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: Invalid or expired stream URL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadError"
+        "502":
+          description: The source could not be fetched or converted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadError"
+  /streams/proxy:
+    get:
+      operationId: proxyHlsResource
+      tags: [streams]
+      summary: Proxy an HLS playlist or media resource
+      description: Fetches a public HLS resource while preserving the source access parameters and rewrites playlist URLs for native players.
+      parameters:
+        - name: url
+          in: query
+          required: true
+          description: Public HTTP(S) URL of an HLS playlist, segment, or key.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Proxied HLS playlist or media resource
+          content:
+            application/vnd.apple.mpegurl:
+              schema:
+                type: string
+            video/mp2t:
+              schema:
+                type: string
+                format: binary
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: Invalid source URL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadError"
+        "502":
+          description: The source could not be fetched
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadError"
 components:
   schemas:
     HealthStatus:
@@ -33,4 +122,13 @@ components:
           type: string
       required:
         - status
+    DownloadError:
+      type: object
+      properties:
+        error:
+          type: string
+        detail:
+          type: string
+      required:
+        - error
 

@@ -6,6 +6,9 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export interface HealthStatus {
-  status: string;
-}
+export type ProxyHlsResourceParams = {
+/**
+ * Public HTTP(S) URL of an HLS playlist, segment, or key.
+ */
+url: string;
+};

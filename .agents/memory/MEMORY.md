@@ -1,0 +1,4 @@
+- [OpenAPI URI schemas](openapi-uri-schemas.md) — avoid `format: uri` when the generated Zod target is Zod 3; it emits an unavailable `zod.url()` call.
+- [Signed HLS links](signed-hls-links.md) — some providers use `s` as start time and `e` as duration, so `s` alone must not be treated as expiry.
+- [Expo web downloads](expo-web-downloads.md) — expo-file-system web download is unavailable; fetch the binary and trigger an anchor download instead.
+- [Offline HLS on iOS](offline-hls-ios.md) — save HLS downloads as self-contained MP4 files; local reconstructed m3u8 playlists are not reliable in AVPlayer.

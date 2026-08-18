@@ -1,44 +1,48 @@
-# [Project name]
+# Téléchargeur vidéo hors ligne
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+Application iOS Expo qui lit des fichiers MP4 et des playlists HLS depuis un lien,
+puis conserve les vidéos téléchargées dans un onglet Hors ligne sans serveur distant.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- `pnpm install` — installer les dépendances
+- `pnpm --filter @workspace/hls-video-player run typecheck` — vérifier les sources mobiles
+- `pnpm --filter @workspace/hls-video-player run build` — générer les bundles Expo de vérification
 
 ## Stack
 
 - pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- Expo SDK 54, React Native 0.81 et Expo Router
+- `expo-video` pour la lecture native
+- `expo-file-system` et AsyncStorage pour la bibliothèque locale
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/hls-video-player/app/index.tsx` — onglets Lecture/Hors ligne,
+  téléchargement direct et lecture locale
+- `artifacts/hls-video-player/app/_layout.tsx` — démarrage Expo autonome
+- `artifacts/hls-video-player/IOS_BUILD.md` — instructions de compilation iOS
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- L’app mobile ne dépend pas de `artifacts/api-server` pour fonctionner.
+- Les MP4 sont stockés dans le dossier privé de l’app.
+- Les playlists HLS non chiffrées sont téléchargées segment par segment et
+  recréées localement.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+L’utilisateur colle un lien dans Lecture, regarde la vidéo, appuie sur Hors ligne,
+puis retrouve et rejoue ses vidéos dans l’onglet Hors ligne sans connexion.
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+Les textes de l’interface sont en français.
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+Les flux HLS chiffrés, les liens expirés et les vidéos protégées par une page web
+ne peuvent pas être téléchargés par une app autonome.
 
 ## Pointers
 
