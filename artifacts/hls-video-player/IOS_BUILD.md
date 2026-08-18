@@ -1,6 +1,28 @@
-# Construire et signer l’application iOS
+# Construire l’application iOS
 
 Le dossier `ios/` a été généré à partir de la configuration Expo du projet. Il contient le projet Xcode et le fichier Swift de démarrage de l’application.
+
+## IPA non signée via GitHub Actions
+
+Le workflow `.github/workflows/build-ios-unsigned.yml` se lance depuis l’onglet
+**Actions** de GitHub avec **Run workflow**, ou automatiquement lorsqu’un tag
+commençant par `v` est poussé.
+
+Il :
+
+1. installe les dépendances JavaScript ;
+2. régénère le projet iOS avec Expo ;
+3. installe les dépendances CocoaPods ;
+4. archive l’application avec `CODE_SIGNING_ALLOWED=NO` ;
+5. crée `HLSVideoPlayer-unsigned.ipa` et le publie comme artefact GitHub.
+
+### Limitation importante
+
+Une IPA non signée **ne peut pas être installée directement sur un iPhone**.
+Apple exige une signature et un profil de provisioning pour toute installation
+sur appareil réel. L’artefact généré est donc destiné à être signé ensuite avec
+un certificat Apple, un profil de provisioning et un identifiant d’application
+autorisés.
 
 ## Sur un Mac avec Xcode
 
