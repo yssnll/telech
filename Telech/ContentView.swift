@@ -49,7 +49,7 @@ struct ContentView: View {
                     }
                 }
             )
-        ) { video in
+        ) {
             if let video = pendingDelete {
                 Button("Supprimer", role: .destructive) {
                     store.removeOffline(video)
