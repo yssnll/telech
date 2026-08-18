@@ -13,7 +13,7 @@ permissions:
 jobs:
   build-ios-ipa:
     name: Compile iOS IPA
-    runs-on: macos-14
+    runs-on: macos-15
 
     steps:
       - name: Checkout
@@ -29,6 +29,9 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+
+      - name: Check Xcode version
+        run: xcodebuild -version
 
       - name: Install JavaScript dependencies
         run: pnpm install --frozen-lockfile

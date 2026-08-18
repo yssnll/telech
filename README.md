@@ -19,7 +19,7 @@ Internet reste nécessaire pour ouvrir ou télécharger une URL vidéo la premi�
 
 ## Build locale
 
-Sur macOS avec Xcode et CocoaPods :
+Sur macOS avec Xcode 16.1 ou plus récent et CocoaPods :
 
 ```bash
 pnpm install
