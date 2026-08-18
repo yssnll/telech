@@ -14,6 +14,10 @@ Cette adresse doit être celle de l’application publiée qui expose l’API so
 `/api`. Pour les builds par tag, configurez plutôt la variable GitHub Actions
 `EXPO_PUBLIC_DOMAIN`.
 
+Le build automatique sur `main` utilise aussi la variable de dépôt GitHub
+`EXPO_PUBLIC_DOMAIN`. Sans cette adresse publique, l’application ne peut pas
+convertir les playlists HLS en MP4.
+
 Il :
 
 1. installe les dépendances JavaScript ;

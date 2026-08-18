@@ -2,6 +2,11 @@ name: Build iOS IPA
 
 on:
   workflow_dispatch:
+    inputs:
+      api_domain:
+        description: "Domaine public de l’application Replit qui expose /api"
+        required: true
+        type: string
   push:
     branches:
       - main
@@ -10,6 +15,11 @@ on:
 
 permissions:
   contents: read
+
+env:
+  # For push builds, set EXPO_PUBLIC_DOMAIN as a GitHub Actions repository
+  # variable. Manual runs can provide the same value through api_domain.
+  EXPO_PUBLIC_DOMAIN: ${{ inputs.api_domain || vars.EXPO_PUBLIC_DOMAIN }}
 
 jobs:
   build-unsigned-ipa:
@@ -20,6 +30,13 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Validate conversion API domain
+        run: |
+          if [ -z "${EXPO_PUBLIC_DOMAIN:-}" ]; then
+            echo "Missing EXPO_PUBLIC_DOMAIN. Run this workflow manually with api_domain, or define the repository variable EXPO_PUBLIC_DOMAIN."
+            exit 1
+          fi
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
