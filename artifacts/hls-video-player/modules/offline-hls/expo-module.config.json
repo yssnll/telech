@@ -1,0 +1,8 @@
+{
+  "platforms": ["apple"],
+  "apple": {
+    "podspecPath": "OfflineHls.podspec",
+    "modules": ["OfflineHlsModule"],
+    "appDelegateSubscribers": ["OfflineHlsAppDelegateSubscriber"]
+  }
+}

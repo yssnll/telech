@@ -12,6 +12,10 @@ expo-env.d.ts
 # Native
 ios/
 android/
+# The offline HLS package contains its own native Swift source and must be
+# committed so GitHub Actions can autolink it during the iOS prebuild.
+!modules/offline-hls/ios/
+!modules/offline-hls/ios/OfflineHlsModule.swift
 *.orig.*
 *.jks
 *.p8

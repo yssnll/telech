@@ -58,6 +58,7 @@
     "zod-validation-error": "^3.4.0"
   },
   "dependencies": {
+    "@workspace/offline-hls": "file:./modules/offline-hls",
     "expo": "~54.0.36",
     "expo-file-system": "~19.0.23",
     "expo-sharing": "~13.0.1",

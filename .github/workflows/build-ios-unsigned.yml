@@ -53,9 +53,25 @@ jobs:
       - name: Install JavaScript dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Verify the native HLS module source
+        run: |
+          test -f artifacts/hls-video-player/modules/offline-hls/package.json
+          test -f artifacts/hls-video-player/modules/offline-hls/OfflineHls.podspec
+          test -f artifacts/hls-video-player/modules/offline-hls/expo-module.config.json
+          test -f artifacts/hls-video-player/modules/offline-hls/ios/OfflineHlsModule.swift
+
       - name: Generate the native iOS project
         working-directory: artifacts/hls-video-player
         run: pnpm exec expo prebuild --platform ios --no-install --non-interactive
+
+      - name: Verify Expo linked OfflineHls
+        working-directory: artifacts/hls-video-player
+        run: |
+          if ! grep -R -E "OfflineHls(Module|AppDelegateSubscriber)" ios; then
+            echo "OfflineHls was not linked into the generated iOS project."
+            echo "This IPA would not contain the native HLS module."
+            exit 1
+          fi
 
       - name: Install CocoaPods dependencies
         working-directory: artifacts/hls-video-player/ios
