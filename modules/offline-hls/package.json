@@ -1,0 +1,11 @@
+{
+  "name": "@workspace/offline-hls",
+  "version": "1.0.0",
+  "private": true,
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "peerDependencies": {
+    "expo": "*",
+    "expo-modules-core": "~3.0.30"
+  }
+}
