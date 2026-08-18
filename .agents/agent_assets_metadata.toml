@@ -7,3 +7,10 @@ uri = "file://exports/hls-video-player-ipa-source.zip"
 type = "unspecified"
 title = "HLS Video Player — source IPA iOS"
 description = "Archive prête pour le build iOS, avec l’app Expo, le serveur API, les bibliothèques partagées et le guide pour générer une vraie IPA signée."
+
+[[outputs]]
+id = "SDomUpY_5G314MqUTfBgY"
+uri = "file://exports/HLSVideoPlayer-unsigned.ipa"
+type = "unspecified"
+title = "HLSVideoPlayer — IPA non signée"
+description = "IPA générée avec succès par GitHub Actions depuis le commit 0314eb1. Elle contient la correction de lecture hors ligne HLS en MP4."
